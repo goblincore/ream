@@ -50,31 +50,43 @@ def get_moe_input(
     :return: dict with computed states
     """
     if inputs_embeds is None:
+        # Chunk-embed; keep result on CPU. moe_forward shuttles chunks to GPU per-layer.
+        # Avoids materialising [N, L, H] = ~ N*L*H*2 bytes on GPU at large calibration scale.
         model.model.embed_tokens.to(device)
-        inputs_embeds = model.model.embed_tokens(input_ids)
+        _chunks = []
+        for _i in range(0, input_ids.shape[0], 32):
+            _ids = input_ids[_i:_i+32].to(device)
+            _chunks.append(model.model.embed_tokens(_ids).detach().cpu())
+            del _ids
+        torch.cuda.empty_cache()
+        inputs_embeds = torch.cat(_chunks, dim=0)
+        del _chunks
 
     if cache_position is None:
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         cache_position = torch.arange(
-            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=device
         )
     if position_ids is None:
         position_ids = cache_position.unsqueeze(0)
 
+    # Use a 1-batch dummy on GPU for mask + rotary; both broadcast across batches in attention.
+    # Avoids materialising [N, 1, L, L] mask which is ~N*L*L*2 bytes on GPU at large N.
+    _dummy_embeds = inputs_embeds[:1].to(device)
+    _dummy_mask = attention_mask[:1].to(device) if attention_mask is not None else None
     mask_function = create_causal_mask if getattr(model.model.config, 'sliding_window', None) is None else create_sliding_window_causal_mask
     causal_mask = mask_function(
         config=model.model.config,
-        input_embeds=inputs_embeds,
-        attention_mask=attention_mask,
+        input_embeds=_dummy_embeds,
+        attention_mask=_dummy_mask,
         cache_position=cache_position,
         past_key_values=past_key_values,
         position_ids=position_ids,
     )
-    hidden_states = inputs_embeds
+    hidden_states = inputs_embeds  # CPU
 
-    # create position embeddings to be shared across the decoder layers
     model.model.rotary_emb.to(device)
-    position_embeddings = model.model.rotary_emb(hidden_states, position_ids)
+    position_embeddings = model.model.rotary_emb(_dummy_embeds, position_ids)
     return {
         'hidden_states': hidden_states,
         'position_embeddings': position_embeddings,
@@ -102,10 +114,27 @@ def moe_forward(decoder_layer, inputs, i=None, chunk_size=None, device=None):
     # input cache_position torch.Size([128]) torch.int64
     if device is not None:
         decoder_layer.to(device)
+
+    hs = inputs['hidden_states'] if i is None else inputs['hidden_states'][i:i+chunk_size]
+    if device is not None:
+        hs = hs.to(device, non_blocking=True)
+
+    am = inputs.get('attention_mask')
+    if am is not None:
+        # mask is [1,1,L,L] (broadcast) when built via 1-batch dummy in get_moe_input;
+        # for [N,1,L,L] (per-sample) masks, slice on dim 0.
+        if am.shape[0] == 1:
+            if device is not None and am.device != torch.device(device):
+                am = am.to(device, non_blocking=True)
+        else:
+            am = am[i:i+chunk_size]
+            if device is not None:
+                am = am.to(device, non_blocking=True)
+
     hidden_states = decoder_layer(
-        hidden_states=inputs['hidden_states'] if i is None else inputs['hidden_states'][i:i+chunk_size],
+        hidden_states=hs,
         position_embeddings=inputs['position_embeddings'],
-        attention_mask=inputs['attention_mask'] if i is None or inputs['attention_mask'] is None else inputs['attention_mask'][i:i+chunk_size],
+        attention_mask=am,
         position_ids=inputs['position_ids'],
         past_key_values=inputs['past_key_values'],
         use_cache=inputs['use_cache'],

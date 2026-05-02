@@ -88,6 +88,10 @@ if __name__ == '__main__':
         action='store_true',
         help='disable applying softmax to the gate outputs; enabled by default'
     )
+    parser.add_argument('--calibration_data_size', default=3072, type=int,
+                        help='number of calibration samples; must match the .pt filename')
+    parser.add_argument('--calibration_data_seq_len', default=512, type=int,
+                        help='calibration seq_len; must match the .pt filename')
     parser.add_argument(
         '--save_path',
         default=None,
@@ -115,6 +119,7 @@ if __name__ == '__main__':
         cache_dir=None if os.path.exists(args.model) else args.cache_dir,
         local_files_only=not args.download,  # download the model manually first (see README for examples)
         low_cpu_mem_usage=False,  # to avoid loading on meta device during merging
+        attn_implementation='eager',  # transformers v5: ensures create_causal_mask returns a tensor (REAM relies on this)
     ).eval()
 
     print(f'Number of parameters before merging: {model.num_parameters()}')
@@ -154,7 +159,9 @@ if __name__ == '__main__':
                     group_size=args.group_size,
                     sequential=not args.no_sequential,
                     use_gate_output=not args.no_gate_output,
-                    gated_sim=not args.no_gated_sim)
+                    gated_sim=not args.no_gated_sim,
+                    calibration_data_size=args.calibration_data_size,
+                    calibration_data_seq_len=args.calibration_data_seq_len)
     model = merger.fit()
     print(f'Number of parameters after merging: {model.num_parameters()}')
 

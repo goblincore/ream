@@ -306,6 +306,7 @@ def build_mtp_layer_qwen3_5(state_dict: dict, model='Qwen/Qwen3.5-122B-A10B', **
     cfg['num_attention_heads'] *= 2
     cfg['decoder_sparse_step'] = 1
     cfg['norm_topk_prob'] = True
+    cfg.setdefault('mlp_only_layers', [])  # Qwen3_5MoeTextConfig lacks this; Qwen3MoeDecoderLayer reads it
     # print(cfg)
     return Qwen3MTPLayer(Qwen3_5MoeTextConfig.from_dict(cfg), state_dict)
 

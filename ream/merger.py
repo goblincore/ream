@@ -254,7 +254,8 @@ class Merger:
 
             if upd_hid:
                 # update hid states given already merged experts in previous layers
-                hidden_states.append(hid_states)
+                # CPU accumulation: avoids 40-layer × [N,L,H] piling up on GPU at large N
+                hidden_states.append(hid_states.cpu())
 
         if upd_hid:
             states['hidden_states'] = torch.cat(hidden_states).data
@@ -490,7 +491,7 @@ class Merger:
                   'gpu mem=%.2f' % mem(0),
                   '\n\n',
                   flush=True)
-            torch.cuda.empty_cache()  # some annoying gpu/cpu memory leaks happen
+            import gc; gc.collect(); torch.cuda.empty_cache()  # some annoying gpu/cpu memory leaks happen
 
         if self.verbose:
             print(self.model.model.layers[self.first_moe_layer].mlp, flush=True)
